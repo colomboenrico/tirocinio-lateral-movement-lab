@@ -1,0 +1,79 @@
+# https://github.com/elastic/beats/blob/master/filebeat/filebeat.reference.yml
+
+filebeat.modules:
+- module: system
+  syslog:
+    enabled: true
+  auth:
+    enabled: true
+- module: auditd
+  log:
+    # - Does not look like Auditd is supported in Alpine linux: https://github.com/linuxkit/linuxkit/issues/52
+    # - CentOS does not need us to install the audit system, it ships as standard. If you are using Ubuntu, though,
+    # this is probably something you would want to install. (sudo apt-get install -y auditd audispd-plugins)
+    enabled: true
+
+#filebeat.inputs:
+#- type: container
+#  enabled: true
+#  paths:
+#    -/var/lib/docker/containers/*/*.log
+#  stream: all # can be all, stdout or stderr
+
+#========================== Filebeat autodiscover ==============================
+# See this URL on how to run Apache2 Filebeat module: # https://www.elastic.co/guide/en/beats/filebeat/current/running-on-docker.html
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      # https://www.elastic.co/guide/en/beats/filebeat/current/configuration-autodiscover-hints.html
+      # This URL alos contains instructions on multi-line logs
+      hints.enabled: true
+
+#================================ Processors ===================================
+processors:
+- add_cloud_metadata: ~
+- add_docker_metadata: ~
+- add_locale:
+    format: offset
+- add_host_metadata:
+    netinfo.enabled: true
+
+
+#========================== Elasticsearch output ===============================
+output.elasticsearch:
+  hosts: ["https://opensearch-node1:9200"]
+  username: admin
+  password: admin
+
+#============================== Dashboards =====================================
+setup.dashboards:
+  enabled: true
+
+#============================== Kibana =========================================
+setup.kibana:
+  host: "http://opensearch-dashboards:5601"
+ #username: admin
+  #password: admin
+
+#============================== Xpack Monitoring ===============================
+xpack.monitoring:
+  enabled: true
+  elasticsearch:
+
+#====== mqtt ====
+filebeat.inputs:
+  - type: mqtt
+    enabled: true
+    paths:
+      - /var/log/ngix/access.log
+    hosts:
+      - tcp://broker:1883
+      - ssl://secure_broker:8883
+    topics:
+      - sample_topic
+    fields :
+      service: nginx
+#output
+output.kafka:
+  hosts: ["localhost:9092"]
+  topic: "filebeat"

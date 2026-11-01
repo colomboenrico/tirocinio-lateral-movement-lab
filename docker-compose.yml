@@ -1,0 +1,261 @@
+version: "3.7"
+services:
+  #inizio kafka
+  zookeeper:
+    image: 'wurstmeister/zookeeper:latest'
+    ports:
+      - '2181:2181'
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+  kafka:
+    image: 'wurstmeister/kafka:latest'
+    ports:
+      - '9092:9092'
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://127.0.0.1:9092
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+    depends_on:
+      - zookeeper
+  #inizio opensearch e opendashboard
+  opensearch-node1:
+    image: opensearchproject/opensearch:1.2.3
+    container_name: opensearch-node1
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch-node1
+      - discovery.seed_hosts=opensearch-node1,opensearch-node2
+      - cluster.initial_master_nodes=opensearch-node1,opensearch-node2
+      - bootstrap.memory_lock=true # along with the memlock settings below, disables swapping
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" # minimum and maximum Java heap size, recommend setting both to 50% of system RAM
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536 # maximum number of open files for the OpenSearch user, set to at least 65536 on modern systems
+        hard: 65536
+    volumes:
+      - opensearch-data1:/usr/share/opensearch/data
+    ports:
+      - 9200:9200
+      - 9600:9600 # required for Performance Analyzer
+    networks:
+      env-net:
+         ipv4_address: 10.0.0.11
+
+  opensearch-node2:
+    image: opensearchproject/opensearch:1.2.3
+    container_name: opensearch-node2
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch-node2
+      - discovery.seed_hosts=opensearch-node1,opensearch-node2
+      - cluster.initial_master_nodes=opensearch-node1,opensearch-node2
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data2:/usr/share/opensearch/data
+    networks:
+      env-net:
+         ipv4_address: 10.0.0.12
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:1.2.0
+    container_name: opensearch-dashboards
+    ports:
+      - 5601:5601
+    expose:
+      - "5601"
+    environment:
+      OPENSEARCH_HOSTS: '["https://opensearch-node1:9200","https://opensearch-node2:9200"]' # must be a string with no spaces when specified as an environment variable
+    networks:
+      env-net:
+        ipv4_address: 10.0.0.10
+  logstash-opensearch:
+    image: docker.elastic.co/logstash/logstash-oss:7.10.2
+    #image: opensearchproject/logstash-oss-with-opensearch-output-plugin:7.16.2
+    container_name: logstash-opensearch
+    volumes:
+      #- type: volume
+      #  source: "./logstash/config"
+      #  target: "/usr/share/logstash/config"
+     # - logstash-oss:/usr/share/logstash
+      - ./logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf
+    networks:
+      env-net:
+         ipv4_address: 10.0.0.15
+    ports:
+      - "5044-5046:5044-5046"
+    expose:
+      - "5044-5046"
+    restart: unless-stopped
+    depends_on:
+      - opensearch-node1
+      - opensearch-node2
+      - opensearch-dashboards
+
+  #filebeat
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:7.17.0
+    # https://github.com/docker/swarmkit/issues/1951
+    hostname: "{{.Node.Hostname}}-filebeat"
+    # Need to override user so we can access the log files, and docker.sock
+    user: root
+    networks:
+       env-net:
+          ipv4_address: 10.0.0.20
+    ports:
+      - "3030"
+    volumes:
+      - /path/to/filebeat.yml:/filebeat/filebeat.yml:ro
+      - /var/log:/var/log:ro
+
+
+
+    command: filebeat -e -c /usr/share/filebeat/filebeat.yml
+    depends_on:
+      - ms
+
+  #inizio auditbeat
+  auditbeat:
+    image: docker.elastic.co/beats/auditbeat:7.12.1
+    # https://github.com/docker/swarmkit/issues/1951
+    hostname: "{{.Node.Hostname}}-auditbeat"
+    # Need to override user so we can access the log files, and docker.sock
+    user: root
+    # https://www.elastic.co/guide/en/beats/auditbeat/current/running-on-docker.html#_special_requirements
+    # PID and CAP_ADD options are ignored as they are Not yet available in swarm mode at the moment.
+    # Eagerly waiting for Docker 19.06 release which will bring --privileged flag to Docker
+    # Swarm Mode https://github.com/moby/moby/issues/24862#issuecomment-451594187
+    # support for capabilities https://github.com/moby/moby/pull/38380
+    pid: host
+    cap_add:
+      - AUDIT_CONTROL
+      - AUDIT_READ
+    networks:
+       env-net:
+           ipv4_address: 10.0.0.21
+    volumes:
+      - ./auditbeat/config/auditbeat.yml:/usr/share/auditbeat/auditbeat.yml
+      - auditbeat:/usr/share/auditbeat/data
+      - /var/log:/var/log:ro
+    environment:
+      - ELASTICSEARCH_HOST=opensearch-cluster:9200
+      - KIBANA_HOST=opensearch-dashboards:5601
+      - ELASTICSEARCH_USERNAME=admin
+      - ELASTICSEARCH_PASSWORD=admin
+      - TINI_SUBREAPER=true
+    command: [ "--strict.perms=false" ]
+    deploy:
+      mode: global
+  packetbeat:
+    image: docker.elastic.co/beats/packetbeat:7.12.1
+    ports:
+      - 9400:9400
+    # https://github.com/docker/swarmkit/issues/1951
+    hostname: "{{.Node.Hostname}}-packetbeat"
+    user: root
+    networks:
+       env-net:
+          ipv4_address: 10.0.0.22
+    configs:
+      - source: pb_config
+        target: /usr/share/packetbeat/packetbeat.yml
+    volumes:
+      - packetbeat:/usr/share/packetbeat/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+#      - ELASTICSEARCH_HOST=opensearch-cluster:9200
+#      - KIBANA_HOST=opensearch-dashboards:5601
+#      - ELASTICSEARCH_USERNAME=admin
+#      - ELASTICSEARCH_PASSWORD=admin
+#      - TINI_SUBREAPER=true
+    - BEAT_STRICT_PERMS=false
+    - ES_HOST=opensearch-cluster
+    - ES_PORT=9200
+    - ES_USER=admin
+    - ES_PASS=admin
+    - KAFKA_HOST=kafka
+    - KAFKA_PORT=9092
+    - KIBANA_HOST=opensearch-dashboards
+    - KIBANA_PORT=5601
+    - MOSQUITTO_HOST=mosquitto
+    - MOSQUITTO_PORT=1883
+      # Eagerly waiting for Docker 19.06 release which will bring --privileged flag to Docker
+      # Swarm Mode https://github.com/moby/moby/issues/24862#issuecomment-451594187
+      # support for capabilities https://github.com/moby/moby/pull/38380
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command: ["--strict.perms=false"]
+    deploy:
+      mode: global
+
+ 
+  #mosquitto
+  mosquitto:
+    image: eclipse-mosquitto
+    ports:
+      - 1883:1883
+    network_mode: host
+    volumes:
+      - ./mosquitto:/mosquitto/conf
+      - ./data:/mosquitto/data
+      - ./log:/mosquitto/log
+
+  multitool:
+    image: praqma/network-multitool
+    container_name: multitool
+    networks:
+      - env-net
+  #metasploit
+  db:
+    image: postgres:10-alpine
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    networks:
+      env-net:
+        ipv4_address: 10.0.0.253
+  ms:
+    image: metasploitframework/metasploit-framework:latest
+    environment:
+      DATABASE_URL: postgres://postgres@db:5432/msf?pool=200&timeout=5
+    links:
+      - db
+    ports:
+      - 4444:4444
+    volumes:
+      - $HOME/.msf4:/home/msf/.msf4
+    command: "tail -f /dev/null"
+
+
+volumes:
+  opensearch-data1:
+  opensearch-data2:
+  filebeat:
+  auditbeat:
+  packetbeat:
+  mosquitto:
+  pg_data:
+    driver: local
+
+
+networks:
+  env-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+       - subnet: 10.0.0.0/24
